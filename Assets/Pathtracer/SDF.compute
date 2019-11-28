@@ -1,0 +1,61 @@
+﻿#pragma kernel CSMain
+
+struct Box
+{
+	float2 position;
+	float2 halfSize;
+	float theta;
+
+	float4 diffuse;
+};
+
+RWStructuredBuffer<Box> Objects;
+uint ObjLength;
+
+float2 CameraOrigin;
+float2 CameraOffset;
+
+// Adapted from: http://www.iquilezles.org/www/articles/distfunctions2d/distfunctions2d.htm
+float sdCircle(float2 p, float r)
+{
+	return length(p) - r;
+}
+
+float sdBox(float2 p, float2 b)
+{
+	float2 d = abs(p) - b;
+	return length(max(d, float2(0, 0))) + min(max(d.x, d.y), 0.0);
+}
+
+float2 rotate(float2 samplePosition, float angle) {
+	float sine, cosine;
+	sincos(angle, sine, cosine);
+	return float2(cosine * samplePosition.x + sine * samplePosition.y, cosine * samplePosition.y - sine * samplePosition.x);
+}
+
+float sdfBox(float2 p, Box box) {
+	return sdBox(rotate(p - box.position, box.theta), box.halfSize);
+}
+
+RWTexture2D<float> SDF;
+RWTexture2D<float4> Diffuse;
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	float2 p = CameraOrigin + (float2(id.xy) * CameraOffset);
+
+	float4 diffuse = float4(0, 0, 0, 0);
+	float d = 10000.0;
+	float d1 = 0;
+	for (uint i = 0; i < ObjLength; i++) {
+		d1 = sdfBox(p, Objects[i]);
+		if (d1 < d) {
+			diffuse = Objects[i].diffuse;
+			d = d1;
+		}
+	}
+
+	SDF[id.xy] = d;
+	Diffuse[id.xy] = diffuse;
+}

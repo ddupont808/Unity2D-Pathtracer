@@ -1,0 +1,171 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+#pragma kernel DirectTrace
+
+float DirectWeight;
+float BounceBias;
+float Lerp;
+float DirectLerp;
+
+Texture2D<float4> _Diffuse;
+SamplerState sampler_Diffuse;
+
+Texture2D<float> _SDF;
+SamplerState sampler_SDF;
+
+Texture2D<float4> _ShadowMap;
+SamplerState sampler_ShadowMap;
+
+int SDFWidth;
+int SDFHeight;
+
+RWTexture2D<float4> Result;
+
+float2 CameraOrigin;
+float2 CameraOffset;
+
+#define PI 3.14159265359
+
+float seed = 0;
+float rand(float nseed) { return frac(sin(seed + nseed)*43758.5453123); }
+
+float2 diffuse(float2 samplePosition, float angle) {
+	float sine, cosine;
+	sincos(angle, sine, cosine);
+	return float2(cosine * samplePosition.x + sine * samplePosition.y, cosine * samplePosition.y - sine * samplePosition.x);
+}
+
+// This is the distance field function.  The distance field represents the closest distance to the surface
+// of any object we put in the scene.  If the given point (point p) is inside of an object, we return a
+// negative answer.
+float map(float2 p) {
+	float2 uv = ((p - CameraOrigin) / CameraOffset) / float2(SDFWidth, SDFHeight);
+	return _SDF.SampleLevel(sampler_SDF, uv, 0);
+}
+
+float4 mapDiffuse(float2 p) {
+	float2 uv = ((p - CameraOrigin) / CameraOffset) / float2(SDFWidth, SDFHeight);
+	return _Diffuse.SampleLevel(sampler_Diffuse, uv, 0);
+}
+
+float3 mapShadow(float2 p) {
+	float2 uv = ((p - CameraOrigin) / CameraOffset) / float2(SDFWidth, SDFHeight);
+	float4 col = _ShadowMap.SampleLevel(sampler_ShadowMap, uv, 0);
+	return col.rgb / max(1, col.a);
+}
+
+float2 calcNormal(in float2 pos)
+{
+	// epsilon - used to approximate dx when taking the derivative
+	const float2 eps = float2(0.001, 0.0);
+
+	// The idea here is to find the "gradient" of the distance field at pos
+	// Remember, the distance field is not boolean - even if you are inside an object
+	// the number is negative, so this calculation still works.
+	// Essentially you are approximating the derivative of the distance field at this point.
+	float2 nor = float2(
+		map(pos + eps.xy).x - map(pos - eps.xy).x,
+		map(pos + eps.yx).x - map(pos - eps.yx).x);
+	return normalize(nor);
+}
+
+float3 raymarch(float2 ro, float2 rd) {
+    const int maxstep = 64;
+    float t = 0; // current distance traveled along ray
+    for (int i = 0; i < maxstep; ++i) {
+        float2 p = ro + rd * t; // World space position of sample
+        float d = map(p);       // Sample of distance field (see map())
+
+        // If the sample <= 0, we have hit something (see map()).
+        if (d < 0.001) {
+			return float3(p.xy, 1.0);
+        }
+
+        // If the sample > 0, we haven't hit anything yet so we should march forward
+        // We step forward by distance d, because d is the minimum distance possible to intersect
+        // an object (see map()).
+        t += d;
+    }
+
+    return float3(0, 0, 0);
+}
+
+[numthreads(8,8,1)]
+void DirectTrace (uint3 id : SV_DispatchThreadID)
+{
+    float2 ro = CameraOrigin + (float2(id.xy) * CameraOffset);
+    float4 col = float4(0, 0, 0, 0);
+
+    if(map(ro) < length(CameraOffset) * 1.5) {
+		const float nseed = (id.x * 281.487977) + (id.y * 492.384134);
+
+		float2 n = calcNormal(ro.xy);
+		const int samples_per_pixel = 10;
+		for (int i = 0; i < samples_per_pixel; i++) {
+			float3 light = float3(1.0, 1.0, 1.0);
+
+			float r = rand(nseed + (i * 323.3192));
+			float2 R = diffuse(n, (r - 0.5) * PI * 2.0);
+
+			float3 p = raymarch(ro, R);
+			if (p.z < 0.5) { //no hit
+				break;
+			}
+
+			float4 color = mapDiffuse(p.xy);
+
+			if (color.a > 0) { //hit light
+				col.rgb += light * color.rgb;
+				break;
+			}
+		}
+
+		col.a += samples_per_pixel;
+	}
+
+	Result[id.xy] = lerp(Result.Load(id.xy) + col, col, DirectLerp);
+}
+
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float2 ro = CameraOrigin + (float2(id.xy) * CameraOffset);
+    float4 col = float4(0, 0, 0, 0);
+
+	const float nseed = (id.x * 281.487977) + (id.y * 492.384134);
+
+	const int samples_per_pixel = 100;
+	const int bounces = 2;
+	for (int i = 0; i < samples_per_pixel; i++) {
+		float3 light = float3(1.0, 1.0, 1.0);
+		float3 p = raymarch(ro, normalize(float2(rand(nseed - i * 323.3192) - 0.5, rand(nseed + i * 323.3192) - 0.5)));
+		for (int j = 0; j < bounces; j++) {
+			if (p.z < 0.5) { //no hit
+				break;
+			}
+
+			float4 color = mapDiffuse(p.xy);
+
+			if (color.a > 0) { //hit light
+				col.rgb += light * color.rgb;
+				break;
+			}
+				
+			//hit object
+
+			float2 n = calcNormal(p.xy);
+			float r = rand(nseed + (i * 323.3192) + (j * 218.5324));
+			float2 R = diffuse(n, (r - 0.5) * PI * 2.0);
+
+			light *= color.rgb;
+			col.rgb += light * mapShadow(p.xy + (n * length(CameraOffset))) * DirectWeight;
+
+			p = raymarch(p.xy + (n * BounceBias), R);
+		}
+	}
+
+	col.a += samples_per_pixel;
+
+	Result[id.xy] = lerp(Result.Load(id.xy) + col, col, Lerp);
+}
