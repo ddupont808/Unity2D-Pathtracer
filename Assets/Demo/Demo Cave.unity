@@ -402,7 +402,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   filterMode: 1
-  resolution: 1
+  resolution: 0.5
   lerp: 0.5
   gamma: 1.2
   shadowStrength: 1
